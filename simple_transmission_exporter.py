@@ -8,6 +8,7 @@ import transmissionrpc
 
 
 METRIC_PREFIX = 'transmission'
+PORT = 29091
 
 # verify all the environment variables are set
 for envvar in ["TRANSMISSION_HOST", "TRANSMISSION_PORT", "TRANSMISSION_USERNAME", "TRANSMISSION_PASSWORD"]:
@@ -62,3 +63,7 @@ def metrics():
     response = make_response('\n'.join([f'{x[0]} {x[1]}' for x in _return]), 200)
     response.mimetype = "text/plain"
     return response
+
+
+if __name__ == '__main__':
+    app.run(debug=True, port=PORT, host='0.0.0.0')
