@@ -3,7 +3,7 @@ import datetime
 import os
 import sys
 
-from flask import Flask, make_response
+from flask import Flask, make_response, request
 import transmissionrpc
 
 
@@ -18,6 +18,21 @@ for envvar in ["TRANSMISSION_HOST", "TRANSMISSION_PORT", "TRANSMISSION_USERNAME"
     exec(envvar + " = tmp")
 
 app = Flask(__name__)
+
+
+@app.route('/')
+def homepage():
+    """
+    https://prometheus.io/docs/instrumenting/writing_exporters/#landing-page
+    """
+    landing_page = f"""A simple Prometheus exporter for Transmission
+https://github.com/sandrotosi/simple-transmission-exporter
+
+metric page: {request.host_url}metrics
+"""
+    response = make_response(landing_page, 200)
+    response.mimetype = "text/plain"
+    return response
 
 
 @app.route('/metrics')
