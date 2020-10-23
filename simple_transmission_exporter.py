@@ -76,7 +76,7 @@ def metrics():
     status = Counter({1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0})
     status.update(y['status'] for y in torrents['arguments']['torrents'])
     for status_id, status_text in STATUS.items():
-        _metric_name = f'{METRIC_PREFIX}_{status_text}'
+        _metric_name = f'{METRIC_PREFIX}_status_{status_text}'
         _return.append((f'# TYPE {_metric_name}', 'gauge'))
         _return.append((_metric_name, status[status_id]))
 
