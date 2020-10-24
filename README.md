@@ -36,6 +36,12 @@ docker run -e TRANSMISSION_HOST=xxx \
 
 The exporter is written in Python, and uses [Flask](https://flask.palletsprojects.com/en/1.1.x/) to expose the HTTP scraping endpoint.
 
+### Grafana dashboard
+
+From these metrics, i wrote a Grafana dashboard, available on [grafana.com (ID 13265)](https://grafana.com/grafana/dashboards/13265) and also as a JSON file [from this repo](grafana/Transmission%20(by%20simple%20exporter).json)
+
+You can find a snapshot of the dashboard [here](https://snapshot.raintank.io/dashboard/snapshot/St5kHTCdEhwzRZp1j1i644szrUdbpdGn)
+
 ### References
 
 - [Writing Prometheus exporters](https://prometheus.io/docs/instrumenting/writing_exporters/)
