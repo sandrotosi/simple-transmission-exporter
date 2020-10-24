@@ -41,3 +41,4 @@ The exporter is written in Python, and uses [Flask](https://flask.palletsproject
 - [Writing Prometheus exporters](https://prometheus.io/docs/instrumenting/writing_exporters/)
 - [Transmission RPC](https://github.com/transmission/transmission/blob/master/extras/rpc-spec.txt)
 - [transmissionrpc python module](https://pypi.org/project/transmissionrpc/)
+- [Containerized Python Development (3 part) series](https://www.docker.com/blog/tag/python-env-series/)
