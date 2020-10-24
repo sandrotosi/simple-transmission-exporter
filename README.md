@@ -15,7 +15,7 @@ Transmission connection parameters are to be specified via environment variables
 
 | Variable | Value |
 | --- | --- |
-| `TRANSMISSION_HOST` | the hostname where [Transmission RPC](https://github.com/transmission/transmission/blob/master/extras/rpc-spec.txt) is running |
+| `TRANSMISSION_HOST` | the hostname where Transmission RPC is running |
 | `TRANSMISSION_PORT` | the port where Transmission RPC is listening |
 | `TRANSMISSION_USERNAME` | the username to connect to Transmission RPC |
 | `TRANSMISSION_PASSWORD` | the password to connect to Transmission RPC |
@@ -23,11 +23,13 @@ Transmission connection parameters are to be specified via environment variables
 ### Docker
 
 ```shell script
+docker pull sandrotosi/simple_transmission_exporter
+
 docker run -e TRANSMISSION_HOST=xxx \
            -e TRANSMISSION_PORT=xxx \
            -e TRANSMISSION_USERNAME=xxx \
            -e TRANSMISSION_PASSWORD=xxx \
-           -d -p 29091:29091 simple_transmission_exporter:latest
+           -d -p 29091:29091 sandrotosi/simple_transmission_exporter
 ```
 
 ### Implementation details
@@ -37,3 +39,5 @@ The exporter is written in Python, and uses [Flask](https://flask.palletsproject
 ### References
 
 - [Writing Prometheus exporters](https://prometheus.io/docs/instrumenting/writing_exporters/)
+- [Transmission RPC](https://github.com/transmission/transmission/blob/master/extras/rpc-spec.txt)
+- [transmissionrpc python module](https://pypi.org/project/transmissionrpc/)
