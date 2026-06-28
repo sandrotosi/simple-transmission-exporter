@@ -26,13 +26,32 @@ STATUS = {
     6: 'seeding',
 }
 
-# verify all the environment variables are set
-for envvar in ["TRANSMISSION_HOST", "TRANSMISSION_PORT", "TRANSMISSION_USERNAME", "TRANSMISSION_PASSWORD"]:
-    tmp = os.getenv(envvar)
-    if not tmp:
-        print(f'ERROR: required environment variable {envvar} is missing, exiting..')
-        sys.exit(-1)
-    exec(envvar + " = tmp")
+def _require_env(name):
+    value = os.getenv(name)
+    if not value:
+        print(f'ERROR: required environment variable {name} is missing, exiting..', file=sys.stderr)
+        sys.exit(1)
+    return value
+
+
+def _parse_int(name, value):
+    try:
+        return int(value)
+    except ValueError:
+        print(f'ERROR: environment variable {name} must be an integer, got {value!r}, exiting..', file=sys.stderr)
+        sys.exit(1)
+
+
+# Transmission connection (required)
+TRANSMISSION_HOST = _require_env('TRANSMISSION_HOST')
+TRANSMISSION_PORT = _parse_int('TRANSMISSION_PORT', _require_env('TRANSMISSION_PORT'))
+TRANSMISSION_USERNAME = _require_env('TRANSMISSION_USERNAME')
+TRANSMISSION_PASSWORD = _require_env('TRANSMISSION_PASSWORD')
+
+# Optional tunables
+TRANSMISSION_PROTOCOL = os.getenv('TRANSMISSION_PROTOCOL', 'http')
+POLL_DELAY_SECONDS = _parse_int('POLL_DELAY_SECONDS', os.getenv('POLL_DELAY_SECONDS', '10'))
+RPC_TIMEOUT_SECONDS = _parse_int('RPC_TIMEOUT_SECONDS', os.getenv('RPC_TIMEOUT_SECONDS', '15'))
 
 app = Flask(__name__)
 
