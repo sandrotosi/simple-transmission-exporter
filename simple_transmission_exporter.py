@@ -8,6 +8,8 @@ from collections import Counter
 import transmissionrpc
 from flask import Flask, make_response, request
 
+__version__ = '1.0.0'
+
 METRIC_PREFIX = 'transmission'
 PORT = 29091
 # RPC direct query to obtain only torrents status
