@@ -8,7 +8,7 @@ from collections import Counter
 from flask import Flask, make_response, request
 from transmission_rpc import Client
 
-__version__ = '1.0.0'
+__version__ = '2.0.0'
 
 METRIC_PREFIX = 'transmission'
 PORT = 29091
