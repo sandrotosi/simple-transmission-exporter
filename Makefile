@@ -5,7 +5,7 @@
 IMAGE   := sandrotosi/simple_transmission_exporter
 VERSION := $(shell sed -n "s/^__version__ = '\(.*\)'/\1/p" simple_transmission_exporter.py)
 
-.PHONY: build push publish login version
+.PHONY: build push publish login version test
 
 # Build the image, tagging it with both the current version and latest.
 build:
@@ -21,6 +21,10 @@ publish: build push
 
 login:
 	docker login
+
+# Run the test suite (install deps first: pip install -r requirements-dev.txt).
+test:
+	pytest -q
 
 # Print the version that would be published.
 version:

@@ -1,0 +1,48 @@
+# TYPE transmission_downloadSpeed gauge
+transmission_downloadSpeed 1000
+# TYPE transmission_download_dir_free_space gauge
+transmission_download_dir_free_space 123456789
+# TYPE transmission_uploadSpeed gauge
+transmission_uploadSpeed 2000
+# TYPE transmission_cumulative_stats_downloadedBytes counter
+transmission_cumulative_stats_downloadedBytes 10
+# TYPE transmission_cumulative_stats_filesAdded counter
+transmission_cumulative_stats_filesAdded 20
+# TYPE transmission_cumulative_stats_secondsActive counter
+transmission_cumulative_stats_secondsActive 30
+# TYPE transmission_cumulative_stats_sessionCount counter
+transmission_cumulative_stats_sessionCount 40
+# TYPE transmission_cumulative_stats_uploadedBytes counter
+transmission_cumulative_stats_uploadedBytes 50
+# TYPE transmission_current_stats_downloadedBytes counter
+transmission_current_stats_downloadedBytes 11
+# TYPE transmission_current_stats_filesAdded counter
+transmission_current_stats_filesAdded 21
+# TYPE transmission_current_stats_secondsActive counter
+transmission_current_stats_secondsActive 31
+# TYPE transmission_current_stats_sessionCount counter
+transmission_current_stats_sessionCount 41
+# TYPE transmission_current_stats_uploadedBytes counter
+transmission_current_stats_uploadedBytes 51
+# TYPE transmission_status_paused gauge
+transmission_status_paused 1
+# TYPE transmission_status_queued_to_check gauge
+transmission_status_queued_to_check 0
+# TYPE transmission_status_checking gauge
+transmission_status_checking 0
+# TYPE transmission_status_queued_to_download gauge
+transmission_status_queued_to_download 0
+# TYPE transmission_status_downloading gauge
+transmission_status_downloading 2
+# TYPE transmission_status_queued_to_seed gauge
+transmission_status_queued_to_seed 0
+# TYPE transmission_status_seeding gauge
+transmission_status_seeding 3
+# TYPE transmission_scrape_duration_seconds gauge
+transmission_scrape_duration_seconds 0.125
+# TYPE transmission_up gauge
+transmission_up 1
+# TYPE transmission_last_collection_timestamp_seconds gauge
+transmission_last_collection_timestamp_seconds 1700000000.0
+# TYPE transmission_exporter_build_info gauge
+transmission_exporter_build_info{version="__VERSION__"} 1
