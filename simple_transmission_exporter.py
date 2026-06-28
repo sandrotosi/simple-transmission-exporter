@@ -1,30 +1,17 @@
 #!/usr/bin/env python3
-import datetime
-import json
 import os
 import sys
-from collections import Counter
+import threading
+import time
 
-import transmissionrpc
 from flask import Flask, make_response, request
+from transmission_rpc import Client
 
 __version__ = '1.0.0'
 
 METRIC_PREFIX = 'transmission'
 PORT = 29091
-# RPC direct query to obtain only torrents status
-TORRENTS_QUERY = json.dumps({"method": "torrent-get", "arguments": {"fields": ["status"]}})
-# the possible states a torrent can have
-# source: https://github.com/transmission/transmission/blob/master/libtransmission/transmission.h#L1649-L1659
-STATUS = {
-    0: 'paused',
-    1: 'queued_to_check',
-    2: 'checking',
-    3: 'queued_to_download',
-    4: 'downloading',
-    5: 'queued_to_seed',
-    6: 'seeding',
-}
+
 
 def _require_env(name):
     value = os.getenv(name)
@@ -55,6 +42,125 @@ RPC_TIMEOUT_SECONDS = _parse_int('RPC_TIMEOUT_SECONDS', os.getenv('RPC_TIMEOUT_S
 
 app = Flask(__name__)
 
+# Cached snapshot of the last successful poll, served to every scrape so a slow
+# or failing RPC never blocks (or distorts) Prometheus. Protected by the lock.
+_state_lock = threading.Lock()
+_last_values = None      # dict from the last successful collect(), or None
+_last_success_ts = 0.0   # unix time of the last successful poll
+_last_poll_ok = False    # did the most recent poll attempt succeed?
+
+_client = None           # long-lived RPC client, (re)connected lazily
+
+
+def _get_client():
+    global _client
+    if _client is None:
+        _client = Client(
+            protocol=TRANSMISSION_PROTOCOL,
+            host=TRANSMISSION_HOST,
+            port=TRANSMISSION_PORT,
+            username=TRANSMISSION_USERNAME,
+            password=TRANSMISSION_PASSWORD,
+            timeout=RPC_TIMEOUT_SECONDS,
+        )
+    return _client
+
+
+def _stats_values(stats):
+    return {
+        'downloaded_bytes': stats.downloaded_bytes,
+        'files_added': stats.files_added,
+        'seconds_active': stats.seconds_active,
+        'session_count': stats.session_count,
+        'uploaded_bytes': stats.uploaded_bytes,
+    }
+
+
+def collect():
+    """Query Transmission once and return a plain dict of metric values."""
+    client = _get_client()
+    started = time.monotonic()
+    stats = client.session_stats()
+    session = client.get_session()
+    free_space = client.free_space(session.download_dir)
+    return {
+        'download_speed': stats.download_speed,
+        'upload_speed': stats.upload_speed,
+        'free_space': free_space if free_space is not None else 0,
+        'cumulative_stats': _stats_values(stats.cumulative_stats),
+        'current_stats': _stats_values(stats.current_stats),
+        'duration': time.monotonic() - started,
+    }
+
+
+# Map the snake_case Stats attributes to the original camelCase metric-name
+# suffixes so emitted metric names stay byte-for-byte identical (the published
+# Grafana dashboard depends on them).
+_STATS_ITEMS = (
+    ('downloaded_bytes', 'downloadedBytes'),
+    ('files_added', 'filesAdded'),
+    ('seconds_active', 'secondsActive'),
+    ('session_count', 'sessionCount'),
+    ('uploaded_bytes', 'uploadedBytes'),
+)
+
+
+def render_metrics(values, up, collected_at):
+    """Render Prometheus exposition text from cached values (pure, no I/O)."""
+    lines = []
+
+    def emit(name, mtype, value, labels=''):
+        full = f'{METRIC_PREFIX}_{name}'
+        lines.append(f'# TYPE {full} {mtype}')
+        lines.append(f'{full}{labels} {value}')
+
+    if values is not None:
+        emit('downloadSpeed', 'gauge', values['download_speed'])
+        emit('download_dir_free_space', 'gauge', values['free_space'])
+        emit('uploadSpeed', 'gauge', values['upload_speed'])
+        for group in ('cumulative_stats', 'current_stats'):
+            stats = values[group]
+            for attr, suffix in _STATS_ITEMS:
+                emit(f'{group}_{suffix}', 'counter', stats[attr])
+        # status metrics are added in a later phase
+        emit('scrape_duration_seconds', 'gauge', values['duration'])
+
+    # https://prometheus.io/docs/instrumenting/writing_exporters/#metrics-about-the-scrape-itself
+    emit('up', 'gauge', 1 if up else 0)
+    emit('last_collection_timestamp_seconds', 'gauge', collected_at)
+    emit('exporter_build_info', 'gauge', 1, labels=f'{{version="{__version__}"}}')
+
+    return '\n'.join(lines)
+
+
+def _poll_once():
+    """Run one poll, updating the cached snapshot. Never raises."""
+    global _last_values, _last_success_ts, _last_poll_ok, _client
+    try:
+        values = collect()
+    except Exception as exc:
+        print(f'WARNING: poll failed: {exc}', file=sys.stderr)
+        with _state_lock:
+            _last_poll_ok = False
+        _client = None  # drop the client so the next poll reconnects
+        return
+    with _state_lock:
+        _last_values = values
+        _last_success_ts = time.time()
+        _last_poll_ok = True
+
+
+def _poll_loop():
+    """Fixed-delay loop: poll, wait, repeat (the delay starts after each poll
+    finishes, so a slow poll can never overlap or pile up)."""
+    while True:
+        _poll_once()
+        time.sleep(POLL_DELAY_SECONDS)
+
+
+def _start_collector():
+    threading.Thread(target=_poll_loop, name='collector', daemon=True).start()
+
 
 @app.route('/')
 def homepage():
@@ -73,43 +179,13 @@ metric page: {request.host_url}metrics
 
 @app.route('/metrics')
 def metrics():
-    _return = []
-    start = datetime.datetime.now()
-    tc = transmissionrpc.Client(address=TRANSMISSION_HOST, port=TRANSMISSION_PORT, user=TRANSMISSION_USERNAME, password=TRANSMISSION_PASSWORD)
-    stats = tc.session_stats()
-
-    for metric in ['downloadSpeed', 'download_dir_free_space', 'uploadSpeed']:
-        _metric_name = f'{METRIC_PREFIX}_{metric}'
-        _return.append((f'# TYPE {_metric_name}', 'gauge'))
-        _return.append((_metric_name, stats._fields[metric].value))
-
-    for metric in ['cumulative_stats', 'current_stats']:
-        for item in ['downloadedBytes', 'filesAdded', 'secondsActive', 'sessionCount', 'uploadedBytes']:
-            _metric_name = f'{METRIC_PREFIX}_{metric}_{item}'
-            _return.append((f'# TYPE {_metric_name}', 'counter'))
-            _return.append((_metric_name, stats._fields[metric].value[item]))
-
-    # obtain torrents status counters
-    # we need to query directly the RPC endpoint (still using transmissionrpc module for actually running the query)
-    # as `get_torrents()` gets extremely slow for if the number of torrent is too high
-    torrents = json.loads(tc._http_query(TORRENTS_QUERY))
-    # initialize a counter with all the possible statuses
-    status = Counter({1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0})
-    status.update(y['status'] for y in torrents['arguments']['torrents'])
-    for status_id, status_text in STATUS.items():
-        _metric_name = f'{METRIC_PREFIX}_status_{status_text}'
-        _return.append((f'# TYPE {_metric_name}', 'gauge'))
-        _return.append((_metric_name, status[status_id]))
-
-    # https://prometheus.io/docs/instrumenting/writing_exporters/#metrics-about-the-scrape-itself
-    _metric_name = f'{METRIC_PREFIX}_scrape_duration_seconds'
-    _return.append((f'# TYPE {_metric_name}', 'gauge'))
-    _return.append((_metric_name, (datetime.datetime.now() - start).total_seconds()))
-
-    response = make_response('\n'.join([f'{x[0]} {x[1]}' for x in _return]), 200)
+    with _state_lock:
+        values, collected_at, up = _last_values, _last_success_ts, _last_poll_ok
+    response = make_response(render_metrics(values, up=up, collected_at=collected_at), 200)
     response.mimetype = "text/plain"
     return response
 
 
 if __name__ == '__main__':
+    _start_collector()
     app.run(debug=False, port=PORT, host='0.0.0.0')
