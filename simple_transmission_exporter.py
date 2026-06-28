@@ -3,6 +3,7 @@ import os
 import sys
 import threading
 import time
+from collections import Counter
 
 from flask import Flask, make_response, request
 from transmission_rpc import Client
@@ -83,12 +84,16 @@ def collect():
     stats = client.session_stats()
     session = client.get_session()
     free_space = client.free_space(session.download_dir)
+    # Only the status field is needed; keeping the payload minimal matters when
+    # there are many torrents.
+    torrents = client.get_torrents(arguments=['status'])
     return {
         'download_speed': stats.download_speed,
         'upload_speed': stats.upload_speed,
         'free_space': free_space if free_space is not None else 0,
         'cumulative_stats': _stats_values(stats.cumulative_stats),
         'current_stats': _stats_values(stats.current_stats),
+        'status_counts': dict(Counter(str(t.status) for t in torrents)),
         'duration': time.monotonic() - started,
     }
 
@@ -102,6 +107,19 @@ _STATS_ITEMS = (
     ('seconds_active', 'secondsActive'),
     ('session_count', 'sessionCount'),
     ('uploaded_bytes', 'uploadedBytes'),
+)
+
+# Map transmission-rpc's status strings to the original metric-name suffixes
+# (order follows the old integer status codes). Rendering iterates this whole
+# table so every status is emitted, defaulting to 0 when absent.
+_STATUS_METRICS = (
+    ('stopped', 'paused'),
+    ('check pending', 'queued_to_check'),
+    ('checking', 'checking'),
+    ('download pending', 'queued_to_download'),
+    ('downloading', 'downloading'),
+    ('seed pending', 'queued_to_seed'),
+    ('seeding', 'seeding'),
 )
 
 
@@ -122,7 +140,9 @@ def render_metrics(values, up, collected_at):
             stats = values[group]
             for attr, suffix in _STATS_ITEMS:
                 emit(f'{group}_{suffix}', 'counter', stats[attr])
-        # status metrics are added in a later phase
+        status_counts = values['status_counts']
+        for status_str, suffix in _STATUS_METRICS:
+            emit(f'status_{suffix}', 'gauge', status_counts.get(status_str, 0))
         emit('scrape_duration_seconds', 'gauge', values['duration'])
 
     # https://prometheus.io/docs/instrumenting/writing_exporters/#metrics-about-the-scrape-itself
