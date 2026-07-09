@@ -40,6 +40,10 @@ transmission_status_queued_to_seed 0
 transmission_status_seeding 3
 # TYPE transmission_scrape_duration_seconds gauge
 transmission_scrape_duration_seconds 0.125
+# TYPE transmission_collector_success gauge
+transmission_collector_success{collector="stats"} 1
+transmission_collector_success{collector="free_space"} 1
+transmission_collector_success{collector="torrents"} 1
 # TYPE transmission_up gauge
 transmission_up 1
 # TYPE transmission_last_collection_timestamp_seconds gauge

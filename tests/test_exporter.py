@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from transmission_rpc.error import TransmissionConnectError, TransmissionError
 
 import simple_transmission_exporter as ste
 
@@ -8,12 +9,14 @@ GOLDEN_DIR = Path(__file__).parent
 
 # Same input used to generate tests/golden_metrics.txt.
 GOLDEN_VALUES = {
-    'download_speed': 1000,
-    'upload_speed': 2000,
+    'stats': {
+        'download_speed': 1000,
+        'upload_speed': 2000,
+        'cumulative_stats': {'downloaded_bytes': 10, 'files_added': 20, 'seconds_active': 30, 'session_count': 40, 'uploaded_bytes': 50},
+        'current_stats': {'downloaded_bytes': 11, 'files_added': 21, 'seconds_active': 31, 'session_count': 41, 'uploaded_bytes': 51},
+    },
     'free_space': 123456789,
-    'cumulative_stats': {'downloaded_bytes': 10, 'files_added': 20, 'seconds_active': 30, 'session_count': 40, 'uploaded_bytes': 50},
-    'current_stats': {'downloaded_bytes': 11, 'files_added': 21, 'seconds_active': 31, 'session_count': 41, 'uploaded_bytes': 51},
-    'status_counts': {'stopped': 1, 'downloading': 2, 'seeding': 3},
+    'torrents': {'stopped': 1, 'downloading': 2, 'seeding': 3},
     'duration': 0.125,
 }
 
@@ -22,7 +25,7 @@ ALL_STATUS_SUFFIXES = [suffix for _, suffix in ste._STATUS_METRICS]
 
 def _values(status_counts):
     out = dict(GOLDEN_VALUES)
-    out['status_counts'] = status_counts
+    out['torrents'] = status_counts
     return out
 
 
@@ -89,20 +92,69 @@ def test_parse_int_accepts_integer():
 
 # --- collector failure handling ----------------------------------------------
 
-def test_failed_poll_keeps_snapshot_and_flips_up(monkeypatch):
-    good = _values(GOLDEN_VALUES['status_counts'])
-    monkeypatch.setattr(ste, 'collect', lambda: good)
+SECTION_NAMES = [name for name, _ in ste._SECTIONS]
+
+
+def _sections(**overrides):
+    """A _SECTIONS table returning golden data, with per-name overrides."""
+    collectors = {
+        'stats': lambda client: GOLDEN_VALUES['stats'],
+        'free_space': lambda client: GOLDEN_VALUES['free_space'],
+        'torrents': lambda client: GOLDEN_VALUES['torrents'],
+    }
+    collectors.update(overrides)
+    return tuple((name, collectors[name]) for name in SECTION_NAMES)
+
+
+@pytest.fixture
+def poll_env(monkeypatch):
+    """Isolate _poll_once from the network and from previous global state."""
+    monkeypatch.setattr(ste, '_get_client', lambda: object())
+    monkeypatch.setattr(ste, '_client', object())
+    monkeypatch.setattr(ste, '_last_values', None)
+    monkeypatch.setattr(ste, '_last_poll_ok', False)
+    monkeypatch.setattr(ste, '_last_success_ts', 0.0)
+    return monkeypatch
+
+
+def test_rpc_error_loses_only_that_section(poll_env):
+    def boom(client):
+        raise TransmissionError('Query failed with result "No such file or directory".')
+
+    poll_env.setattr(ste, '_SECTIONS', _sections(free_space=boom))
     ste._poll_once()
-    assert ste._last_poll_ok is True
-    assert ste._last_values == good
+    assert ste._last_poll_ok is True  # the daemon answered: still up
+    assert ste._last_values['stats'] == GOLDEN_VALUES['stats']
+    assert ste._last_values['free_space'] is None
+    assert ste._last_values['torrents'] == GOLDEN_VALUES['torrents']
+    assert ste._client is not None  # connection was fine, no reconnect churn
 
-    def boom():
-        raise RuntimeError('rpc down')
 
-    monkeypatch.setattr(ste, 'collect', boom)
+@pytest.mark.parametrize('exc', [
+    TransmissionConnectError('connection refused'),  # subclasses TransmissionError!
+    ConnectionError('socket error'),                 # anything non-RPC-level
+])
+def test_transport_error_fails_poll_and_drops_client(poll_env, exc):
+    def boom(client):
+        raise exc
+
+    poll_env.setattr(ste, '_SECTIONS', _sections(stats=boom))
     ste._poll_once()
     assert ste._last_poll_ok is False
-    assert ste._last_values == good  # previous snapshot retained
+    assert all(ste._last_values[name] is None for name in SECTION_NAMES)
+    assert ste._client is None  # dropped so the next poll reconnects
+
+
+def test_render_omits_metrics_of_failed_section():
+    values = dict(GOLDEN_VALUES)
+    values['free_space'] = None
+    out = ste.render_metrics(values, up=True, collected_at=0.0)
+    assert 'transmission_download_dir_free_space' not in out
+    assert 'transmission_downloadSpeed 1000' in out  # other sections unaffected
+    assert 'transmission_status_seeding 3' in out
+    assert 'transmission_collector_success{collector="free_space"} 0' in out
+    assert 'transmission_collector_success{collector="stats"} 1' in out
+    assert 'transmission_collector_success{collector="torrents"} 1' in out
 
 
 # --- HTTP smoke --------------------------------------------------------------

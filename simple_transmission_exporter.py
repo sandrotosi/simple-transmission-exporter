@@ -7,8 +7,9 @@ from collections import Counter
 
 from flask import Flask, make_response, request
 from transmission_rpc import Client
+from transmission_rpc.error import TransmissionConnectError, TransmissionError
 
-__version__ = '2.0.0'
+__version__ = '2.1.0'
 
 METRIC_PREFIX = 'transmission'
 PORT = 29091
@@ -43,12 +44,14 @@ RPC_TIMEOUT_SECONDS = _parse_int('RPC_TIMEOUT_SECONDS', os.getenv('RPC_TIMEOUT_S
 
 app = Flask(__name__)
 
-# Cached snapshot of the last successful poll, served to every scrape so a slow
-# or failing RPC never blocks (or distorts) Prometheus. Protected by the lock.
+# Snapshot of the most recent poll, served to every scrape so a slow RPC never
+# blocks Prometheus. Each section that failed on that poll is None and its
+# metrics are omitted from the output: a gap is honest, while a stale or zero
+# value would distort dashboards and alerts. Protected by the lock.
 _state_lock = threading.Lock()
-_last_values = None      # dict from the last successful collect(), or None
-_last_success_ts = 0.0   # unix time of the last successful poll
-_last_poll_ok = False    # did the most recent poll attempt succeed?
+_last_values = None      # per-section dict from the most recent poll, or None
+_last_success_ts = 0.0   # unix time of the last poll with any successful section
+_last_poll_ok = False    # did any section succeed on the most recent poll?
 
 _client = None           # long-lived RPC client, (re)connected lazily
 
@@ -77,25 +80,37 @@ def _stats_values(stats):
     }
 
 
-def collect():
-    """Query Transmission once and return a plain dict of metric values."""
-    client = _get_client()
-    started = time.monotonic()
+def _collect_stats(client):
     stats = client.session_stats()
-    session = client.get_session()
-    free_space = client.free_space(session.download_dir)
-    # Only the status field is needed; keeping the payload minimal matters when
-    # there are many torrents.
-    torrents = client.get_torrents(arguments=['status'])
     return {
         'download_speed': stats.download_speed,
         'upload_speed': stats.upload_speed,
-        'free_space': free_space if free_space is not None else 0,
         'cumulative_stats': _stats_values(stats.cumulative_stats),
         'current_stats': _stats_values(stats.current_stats),
-        'status_counts': dict(Counter(str(t.status) for t in torrents)),
-        'duration': time.monotonic() - started,
     }
+
+
+def _collect_free_space(client):
+    # The session download-dir can change (or disappear) at runtime, in which
+    # case the daemon answers the free-space query with an error.
+    session = client.get_session()
+    return client.free_space(session.download_dir)
+
+
+def _collect_torrents(client):
+    # Only the status field is needed; keeping the payload minimal matters when
+    # there are many torrents.
+    torrents = client.get_torrents(arguments=['status'])
+    return dict(Counter(str(t.status) for t in torrents))
+
+
+# Independent collection sections: one failing (e.g. free-space on a
+# download-dir that no longer exists) must not lose the others.
+_SECTIONS = (
+    ('stats', _collect_stats),
+    ('free_space', _collect_free_space),
+    ('torrents', _collect_torrents),
+)
 
 
 # Map the snake_case Stats attributes to the original camelCase metric-name
@@ -133,17 +148,26 @@ def render_metrics(values, up, collected_at):
         lines.append(f'{full}{labels} {value}')
 
     if values is not None:
-        emit('downloadSpeed', 'gauge', values['download_speed'])
-        emit('download_dir_free_space', 'gauge', values['free_space'])
-        emit('uploadSpeed', 'gauge', values['upload_speed'])
-        for group in ('cumulative_stats', 'current_stats'):
-            stats = values[group]
-            for attr, suffix in _STATS_ITEMS:
-                emit(f'{group}_{suffix}', 'counter', stats[attr])
-        status_counts = values['status_counts']
-        for status_str, suffix in _STATUS_METRICS:
-            emit(f'status_{suffix}', 'gauge', status_counts.get(status_str, 0))
+        stats = values['stats']
+        if stats is not None:
+            emit('downloadSpeed', 'gauge', stats['download_speed'])
+        if values['free_space'] is not None:
+            emit('download_dir_free_space', 'gauge', values['free_space'])
+        if stats is not None:
+            emit('uploadSpeed', 'gauge', stats['upload_speed'])
+            for group in ('cumulative_stats', 'current_stats'):
+                for attr, suffix in _STATS_ITEMS:
+                    emit(f'{group}_{suffix}', 'counter', stats[group][attr])
+        status_counts = values['torrents']
+        if status_counts is not None:
+            for status_str, suffix in _STATUS_METRICS:
+                emit(f'status_{suffix}', 'gauge', status_counts.get(status_str, 0))
         emit('scrape_duration_seconds', 'gauge', values['duration'])
+        # One family with a sample per section, so only one # TYPE line.
+        lines.append(f'# TYPE {METRIC_PREFIX}_collector_success gauge')
+        for name, _ in _SECTIONS:
+            ok = 1 if values[name] is not None else 0
+            lines.append(f'{METRIC_PREFIX}_collector_success{{collector="{name}"}} {ok}')
 
     # https://prometheus.io/docs/instrumenting/writing_exporters/#metrics-about-the-scrape-itself
     emit('up', 'gauge', 1 if up else 0)
@@ -154,20 +178,37 @@ def render_metrics(values, up, collected_at):
 
 
 def _poll_once():
-    """Run one poll, updating the cached snapshot. Never raises."""
+    """Run one poll, updating the cached snapshot. Never raises.
+
+    A plain TransmissionError means the daemon answered but the query failed
+    (RPC-level), so only that section is lost and the connection is kept.
+    Anything else — including TransmissionConnectError, which subclasses
+    TransmissionError — means nothing further can succeed this poll: abandon
+    it and drop the client so the next poll reconnects.
+    """
     global _last_values, _last_success_ts, _last_poll_ok, _client
+    results = {name: None for name, _ in _SECTIONS}
+    started = time.monotonic()
     try:
-        values = collect()
+        client = _get_client()
+        for name, collector in _SECTIONS:
+            try:
+                results[name] = collector(client)
+            except TransmissionConnectError:
+                raise
+            except TransmissionError as exc:
+                print(f'WARNING: {name} collection failed: {exc}', file=sys.stderr)
     except Exception as exc:
         print(f'WARNING: poll failed: {exc}', file=sys.stderr)
-        with _state_lock:
-            _last_poll_ok = False
-        _client = None  # drop the client so the next poll reconnects
-        return
+        _client = None
+    values = dict(results)
+    values['duration'] = time.monotonic() - started
+    ok = any(v is not None for v in results.values())
     with _state_lock:
         _last_values = values
-        _last_success_ts = time.time()
-        _last_poll_ok = True
+        _last_poll_ok = ok
+        if ok:
+            _last_success_ts = time.time()
 
 
 def _poll_loop():
