@@ -9,7 +9,7 @@ from flask import Flask, make_response, request
 from transmission_rpc import Client
 from transmission_rpc.error import TransmissionConnectError, TransmissionError
 
-__version__ = '2.1.0'
+__version__ = '2.1.1'
 
 METRIC_PREFIX = 'transmission'
 PORT = 29091
@@ -44,12 +44,13 @@ RPC_TIMEOUT_SECONDS = _parse_int('RPC_TIMEOUT_SECONDS', os.getenv('RPC_TIMEOUT_S
 
 app = Flask(__name__)
 
-# Snapshot of the most recent poll, served to every scrape so a slow RPC never
-# blocks Prometheus. Each section that failed on that poll is None and its
-# metrics are omitted from the output: a gap is honest, while a stale or zero
-# value would distort dashboards and alerts. Protected by the lock.
+# Cached snapshot served to every scrape so a slow or failing RPC never blocks
+# (or gaps) Prometheus: each section keeps its last-known values across failed
+# polls, so transient daemon timeouts don't make graphs choppy. Staleness is
+# visible instead through transmission_collector_success (per section) and
+# transmission_last_collection_timestamp_seconds. Protected by the lock.
 _state_lock = threading.Lock()
-_last_values = None      # per-section dict from the most recent poll, or None
+_last_values = None      # per-section last-known values (+ 'collectors_ok'), or None
 _last_success_ts = 0.0   # unix time of the last poll with any successful section
 _last_poll_ok = False    # did any section succeed on the most recent poll?
 
@@ -148,6 +149,8 @@ def render_metrics(values, up, collected_at):
         lines.append(f'{full}{labels} {value}')
 
     if values is not None:
+        # Section values are last-known (cached across failed polls); they are
+        # only None — and their metrics omitted — before the first success.
         stats = values['stats']
         if stats is not None:
             emit('downloadSpeed', 'gauge', stats['download_speed'])
@@ -164,9 +167,10 @@ def render_metrics(values, up, collected_at):
                 emit(f'status_{suffix}', 'gauge', status_counts.get(status_str, 0))
         emit('scrape_duration_seconds', 'gauge', values['duration'])
         # One family with a sample per section, so only one # TYPE line.
+        collectors_ok = values['collectors_ok']
         lines.append(f'# TYPE {METRIC_PREFIX}_collector_success gauge')
         for name, _ in _SECTIONS:
-            ok = 1 if values[name] is not None else 0
+            ok = 1 if collectors_ok.get(name) else 0
             lines.append(f'{METRIC_PREFIX}_collector_success{{collector="{name}"}} {ok}')
 
     # https://prometheus.io/docs/instrumenting/writing_exporters/#metrics-about-the-scrape-itself
@@ -181,33 +185,43 @@ def _poll_once():
     """Run one poll, updating the cached snapshot. Never raises.
 
     A plain TransmissionError means the daemon answered but the query failed
-    (RPC-level), so only that section is lost and the connection is kept.
+    (RPC-level), so only that section fails and the connection is kept.
     Anything else — including TransmissionConnectError, which subclasses
     TransmissionError — means nothing further can succeed this poll: abandon
-    it and drop the client so the next poll reconnects.
+    it and drop the client so the next poll reconnects. Either way a failed
+    section keeps its last-known values; only its collectors_ok flag drops.
     """
     global _last_values, _last_success_ts, _last_poll_ok, _client
-    results = {name: None for name, _ in _SECTIONS}
+    fresh = {}
+    ok = {}
     started = time.monotonic()
     try:
         client = _get_client()
         for name, collector in _SECTIONS:
             try:
-                results[name] = collector(client)
+                fresh[name] = collector(client)
+                ok[name] = True
             except TransmissionConnectError:
                 raise
             except TransmissionError as exc:
                 print(f'WARNING: {name} collection failed: {exc}', file=sys.stderr)
+                ok[name] = False
     except Exception as exc:
         print(f'WARNING: poll failed: {exc}', file=sys.stderr)
         _client = None
-    values = dict(results)
-    values['duration'] = time.monotonic() - started
-    ok = any(v is not None for v in results.values())
+        # sections never attempted this poll count as failed
+        for name, _ in _SECTIONS:
+            ok.setdefault(name, False)
+    duration = time.monotonic() - started
+    any_ok = any(ok.values())
     with _state_lock:
+        prev = _last_values or {}
+        values = {name: fresh.get(name, prev.get(name)) for name, _ in _SECTIONS}
+        values['collectors_ok'] = ok
+        values['duration'] = duration
         _last_values = values
-        _last_poll_ok = ok
-        if ok:
+        _last_poll_ok = any_ok
+        if any_ok:
             _last_success_ts = time.time()
 
 

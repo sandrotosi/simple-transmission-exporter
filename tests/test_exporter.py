@@ -17,6 +17,7 @@ GOLDEN_VALUES = {
     },
     'free_space': 123456789,
     'torrents': {'stopped': 1, 'downloading': 2, 'seeding': 3},
+    'collectors_ok': {'stats': True, 'free_space': True, 'torrents': True},
     'duration': 0.125,
 }
 
@@ -117,7 +118,7 @@ def poll_env(monkeypatch):
     return monkeypatch
 
 
-def test_rpc_error_loses_only_that_section(poll_env):
+def test_rpc_error_fails_only_that_section(poll_env):
     def boom(client):
         raise TransmissionError('Query failed with result "No such file or directory".')
 
@@ -125,36 +126,63 @@ def test_rpc_error_loses_only_that_section(poll_env):
     ste._poll_once()
     assert ste._last_poll_ok is True  # the daemon answered: still up
     assert ste._last_values['stats'] == GOLDEN_VALUES['stats']
-    assert ste._last_values['free_space'] is None
+    assert ste._last_values['free_space'] is None  # no earlier value to keep
     assert ste._last_values['torrents'] == GOLDEN_VALUES['torrents']
+    assert ste._last_values['collectors_ok'] == {'stats': True, 'free_space': False, 'torrents': True}
     assert ste._client is not None  # connection was fine, no reconnect churn
+
+
+def test_failed_section_keeps_last_known_value(poll_env):
+    poll_env.setattr(ste, '_SECTIONS', _sections())
+    ste._poll_once()  # a good poll first
+
+    def boom(client):
+        raise TransmissionError('Query failed with result "No such file or directory".')
+
+    poll_env.setattr(ste, '_SECTIONS', _sections(free_space=boom))
+    ste._poll_once()
+    assert ste._last_values['free_space'] == GOLDEN_VALUES['free_space']  # cached
+    assert ste._last_values['collectors_ok']['free_space'] is False
 
 
 @pytest.mark.parametrize('exc', [
     TransmissionConnectError('connection refused'),  # subclasses TransmissionError!
     ConnectionError('socket error'),                 # anything non-RPC-level
 ])
-def test_transport_error_fails_poll_and_drops_client(poll_env, exc):
+def test_transport_error_fails_poll_but_keeps_values(poll_env, exc):
+    poll_env.setattr(ste, '_SECTIONS', _sections())
+    ste._poll_once()  # a good poll first
+
     def boom(client):
         raise exc
 
     poll_env.setattr(ste, '_SECTIONS', _sections(stats=boom))
     ste._poll_once()
     assert ste._last_poll_ok is False
-    assert all(ste._last_values[name] is None for name in SECTION_NAMES)
+    for name in SECTION_NAMES:
+        assert ste._last_values[name] == GOLDEN_VALUES[name]  # cached snapshot
+        assert ste._last_values['collectors_ok'][name] is False
     assert ste._client is None  # dropped so the next poll reconnects
 
 
-def test_render_omits_metrics_of_failed_section():
+def test_render_keeps_cached_metrics_and_flags_failed_section():
     values = dict(GOLDEN_VALUES)
-    values['free_space'] = None
+    values['collectors_ok'] = {'stats': True, 'free_space': False, 'torrents': True}
     out = ste.render_metrics(values, up=True, collected_at=0.0)
-    assert 'transmission_download_dir_free_space' not in out
-    assert 'transmission_downloadSpeed 1000' in out  # other sections unaffected
-    assert 'transmission_status_seeding 3' in out
+    assert 'transmission_download_dir_free_space 123456789' in out  # cached value
+    assert 'transmission_downloadSpeed 1000' in out
     assert 'transmission_collector_success{collector="free_space"} 0' in out
     assert 'transmission_collector_success{collector="stats"} 1' in out
     assert 'transmission_collector_success{collector="torrents"} 1' in out
+
+
+def test_render_omits_metrics_never_collected():
+    values = dict(GOLDEN_VALUES)
+    values['free_space'] = None  # no success yet since startup
+    values['collectors_ok'] = {'stats': True, 'free_space': False, 'torrents': True}
+    out = ste.render_metrics(values, up=True, collected_at=0.0)
+    assert 'transmission_download_dir_free_space' not in out
+    assert 'transmission_downloadSpeed 1000' in out
 
 
 # --- HTTP smoke --------------------------------------------------------------
